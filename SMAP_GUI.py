@@ -2,8 +2,9 @@
 import tkinter as tk
 import tkinter.ttk as ttk
 import subprocess
-import os
-import sched, time, threading 
+import os as osCommand
+import sched, time, threading
+from datetime import datetime
 #Camera
 import io as cameraIO
 import picamera
@@ -22,14 +23,41 @@ import pytorch_lightning as pl
 from pytorch_lightning.metrics.functional import accuracy
 import pandas as pd
 from PIL import Image
+#Muzika
+import pygame
 
+        
+# Definice pomocne tridy pro neuronku
+class CweFace(pl.LightningModule):
+
+    def __init__(self, num_target_classes):
+        print("Nacitam model")
+        super().__init__()
+        self.model = torch.jit.load("model_final_epoch_01.ts",map_location='cpu')
+        self.acc = pl.metrics.Accuracy()
+
+    def forward(self, x):
+        return self.model(x)
+
+print(torch.__version__)
 isRunning = 0
+lastFaceEmotion = 100
 
 #Neuronka
-#model = CweFace(4)
+model = CweFace(4)
+loader = transforms.Compose([
+    transforms.Resize(244),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
 
 #Kamera
 face_cascade = cv2.CascadeClassifier('/home/pi/project_folder/haarcascade_frontalface_default.xml')
+
+#Hudba
+pygame.init()
+pygame.mixer.init()
+pygame.mixer.music.load("sound.mp3")
 
 #Klavesnice
 keyWindow = tk.Tk()  # key window name
@@ -61,26 +89,34 @@ def pressOff(btn):
 def mainProgramStart():
     global isRunning
     isRunning = 1
-        #os.system("xmodmap -pke > .Xmodmap")  #A
-        #subprocess.call(['xmodmap','-e', 'keycode 10= '])
-        #subprocess.call(['xmodmap','-e', 'keycode 20 = '])
-        #subprocess.call(['xmodmap','-e', 'keycode 30 = '])
-        #subprocess.call(['xmodmap','-pke'])
-        #os.system("xmodmap .Xmodmap")
+    osCommand.system("xmodmap -pke > .Xmodmap")  #A
+    #subprocess.call(['xmodmap','-e', 'keycode 10= '])
+    #subprocess.call(['xmodmap','-e', 'keycode 20 = '])
+    #subprocess.call(['xmodmap','-e', 'keycode 30 = '])
+    #subprocess.call(['xmodmap','-pke'])
+    #os.system("xmodmap .Xmodmap")
     threading.Timer(10, mainProgram).start()
 def mainProgramStop():
-    #os.system("xmodmap .Xmodmap")
+    #Lagne celej system
+    osCommand.system("xmodmap .Xmodmap")
     global isRunning
     isRunning = 0
-       
+    
+def image_loader(image_name):
+    """load image, tensor"""
+    custom_image = Image.open(image_name).convert('RGB')
+    custom_image = loader(custom_image).float()
+    custom_image = custom_image.unsqueeze(0)
+    return custom_image         
 #MAIN CODE
 def mainProgram():
     print("Start")
     if isRunning is 1:
+        nextBreakTime = 10
         print("Take image")
         stream = cameraIO.BytesIO()
         with picamera.PiCamera() as camera:
-            camera.resolution = (1024 , 768 )
+            camera.resolution = (1920 , 1080 )
             camera.capture(stream, format='jpeg')
         buff = numpy.frombuffer(stream.getvalue(), dtype=numpy.uint8)
         image = cv2.imdecode(buff, 1)
@@ -89,30 +125,45 @@ def mainProgram():
         faces = face_cascade.detectMultiScale(gray, 1.1, 5)
         size = 0
         print ("Found {}" + str(len(faces)) + " face(s)")
-        for (x,y,w,h) in faces:
-            if((w*h) > size):
-                size = w*h
-                # - Ctverec kolem oblicejecv2.rectangle(image,(x,y),(x+w,y+h),(255,255,0),4)
-                img_cropped = gray[y-4:y+h+4, x-4:x+w+4]
-                cv2.imwrite('result_gray_cut.jpg',img_cropped)
-        print("Transform image")        
-        print("Block keyboard")
-        print("Unblock keyboard")
-        print("Play music")
-        print("Take pause")
-        threading.Timer(10, mainProgram).start()
-        
-# Definice pomocne tridy
-
-class CweFace(pl.LightningModule):
-
-    def __init__(self, num_target_classes):
-        super().__init__()
-        self.model = torch.jit.load("model_final_epoch_01.ts",map_location='cpu')
-        self.acc = pl.metrics.Accuracy()
-
-    def forward(self, x):
-        return self.model(x)
+        if len(faces) > 0:
+            for (x,y,w,h) in faces:
+                if((w*h) > size):
+                    size = w*h
+                    # - Ctverec kolem oblicejecv2.rectangle(image,(x,y),(x+w,y+h),(255,255,0),4)
+                    img_cropped = image[y-4:y+h+4, x-4:x+w+4]
+                    cv2.imwrite('result_gray_cut.jpg',img_cropped)
+            print("Transform image")
+            class_names = ['angry', 'happy', 'neutral', 'sad'] # Pro info
+            imagePred = image_loader("result_gray_cut.jpg")
+            #print(imagePred) #Kontrola
+            outputs = model(imagePred)
+            _, preds = torch.max(outputs, 1)
+            print("Nalada je: ", class_names[preds])
+            global lastFaceEmotion
+            if (lastFaceEmotion is not preds):
+                #Pokud se neznenil stav, nema smysl cokoli upravovat
+                if (preds is 0):
+                   print("Block keyboard")
+                   subprocess.call(['xmodmap','-e', 'keycode 36= '])
+                   subprocess.call(['xmodmap','-e', 'keycode 104= '])
+                   nextBreakTime = 20
+                if (preds is 1 or preds is 2):
+                    print("Unblock keyboard")
+                    pygame.mixer.music.stop()
+                    subprocess.call(['xmodmap','-e', 'keycode 36= KP_Enter NoSymbol KP_Enter'])
+                    subprocess.call(['xmodmap','-e', 'keycode 104= KP_Enter NoSymbol KP_Enter'])
+                if (preds is 0 or preds is 3):
+                    print("Play music")
+                    pygame.mixer.music.play()
+                    nextBreakTime = 15
+            print("Take pause")
+            lastFaceEmotion = preds
+        else:
+            print("Nenašel jsem obličej na fotografii")
+            jmeno = "noFace" + datetime.now().strftime("%d_%m_%Y-%H_%M_%S") + ".jpg"
+            print("noFace",datetime.now().strftime("%d_%m_%Y-%H_%M_%S"),".jpg", sep='')
+            cv2.imwrite(jmeno,image)
+        threading.Timer(nextBreakTime, mainProgram).start()
 
 #GUI
 # First line
